@@ -434,6 +434,8 @@ extern "gs_gfx_cursor_visible" fn cursor_visible() -> bool;
 // test drives a program with. The mouse goes to pixel x, y; a button of 0
 // only moves it.
 extern "gs_gfx_inject_key" fn inject_key(name: const u8[:], down: bool) -> bool;
+// Wheel deltas join the ordered event stream; positive y scrolls up. Pointer is unchanged.
+extern "gs_gfx_inject_wheel" fn inject_wheel(x: f32, y: f32) -> bool;
 extern "gs_gfx_inject_mouse" fn inject_mouse(x: f32, y: f32, button: i64, down: bool);
 // Text as if typed: an EVENT_TEXT per character at the next frame().
 extern "gs_gfx_inject_text" fn inject_text(text: const u8[:]) -> bool;

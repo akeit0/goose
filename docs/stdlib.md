@@ -600,6 +600,7 @@ fn focused() -> bool                                      // keyboard focus at t
 fn set_mouse_relative(on: bool) -> bool    fn mouse_relative() -> bool
 fn set_cursor_visible(visible: bool) -> bool    fn cursor_visible() -> bool
 fn inject_key(name: const u8[:], down: bool) -> bool           // as if typed, seen at the next frame()
+fn inject_wheel(x: f32, y: f32) -> bool                        // finite wheel deltas; positive y up
 fn inject_mouse(x: f32, y: f32, button: i64, down: bool)       // to pixel x, y; button 0 only moves
 fn inject_text(text: const u8[:]) -> bool                      // an EVENT_TEXT per character
 fn inject_focus(focused: bool) -> bool                        // simulate focus at the next frame()

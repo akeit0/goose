@@ -3,6 +3,7 @@
 
 #include "gfx_internal.h"
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdlib.h>
 
@@ -860,6 +861,20 @@ uint8_t gs_gfx_inject_key(gs_gfx_bytes name, uint8_t down) {
     e.key.scancode = sc;
     e.key.key = SDL_GetKeyFromScancode(sc, SDL_KMOD_NONE, false);
     e.key.down = down != 0;
+    return SDL_PushEvent(&e);
+}
+
+uint8_t gs_gfx_inject_wheel(float x, float y) {
+    if (!gfx_need_device("inject_wheel")) return 0;
+    if (!isfinite(x) || !isfinite(y)) return gfx_fail("inject_wheel: deltas must be finite");
+    SDL_Event e;
+    SDL_zero(e);
+    e.type = SDL_EVENT_MOUSE_WHEEL;
+    e.wheel.timestamp = SDL_GetTicksNS();
+    e.wheel.windowID = gfx.window ? SDL_GetWindowID(gfx.window) : 0;
+    e.wheel.which = GFX_INJECTED_MOUSE;
+    e.wheel.x = x;
+    e.wheel.y = y;
     return SDL_PushEvent(&e);
 }
 
