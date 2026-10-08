@@ -479,7 +479,10 @@ inline string CodeGen::CT(TypeExpr *t) {
     switch (t->kind) {
         case TY_SLICE: {
             auto e = IsBytesT(t->sub) ? string("uint8_t") : CT(t->sub);
-            Append(d, "typedef struct { ", e, " *data; int64_t len; } ", name, ";\n");
+            // A reusable native adapter can provide the same slice when an
+            // unused extern leaves it out of this program's generated types.
+            Append(d, "#ifndef GS_TYPE_", name, "\n#define GS_TYPE_", name,
+                   "\ntypedef struct { ", e, " *data; int64_t len; } ", name, ";\n#endif\n");
             break;
         }
         case TY_ARRAY: {

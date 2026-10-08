@@ -71,6 +71,11 @@ jobs:
       - name: Test
         run: python test/run_tests.py --profile baseline --cc native --require-clang
 
+      - name: Check optional native adapters
+        run: >-
+          python test/check_native_adapters.py
+          --exe "build/${{ runner.os == 'Windows' && 'Debug/goose.exe' || 'goose' }}"
+
   sanitize:
     name: Linux / ASan + UBSan
     runs-on: ubuntu-latest
