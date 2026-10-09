@@ -2,6 +2,10 @@
 
 # The Goose Programming Language
 
+This is the `lab-toolchain` integration branch of [akeit0/goose](https://github.com/akeit0/goose),
+based on [aardappel/goose](https://github.com/aardappel/goose). Its optional toolchain
+and graphics extensions are listed in [fork capabilities and checks](docs/fork.md).
+
 A memory-safe systems language with no heap allocator, garbage collector, or
 lifetime annotations. In this repository's benchmarks, Goose runs faster than
 C++ and Rust while using less memory.
