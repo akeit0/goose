@@ -161,6 +161,7 @@ bool gfx_submit(void) {
     if (!gfx.cmd) return true;
     SDL_GPUCommandBuffer *cb = gfx.cmd;
     gfx.cmd = NULL;
+    gfx.submits++;
     return SDL_SubmitGPUCommandBuffer(cb) || gfx_sdl_fail("submitting commands");
 }
 
@@ -261,6 +262,7 @@ bool gfx_create_screen(int w, int h) {
     dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPURenderPass *p = SDL_BeginGPURenderPass(cb, &ct, 1, &dt);
     if (p) SDL_EndGPURenderPass(p);
+    gfx.screen_revision++; gfx.screen_content_revision++; gfx.present_requested = true;
     return true;
 }
 
@@ -509,6 +511,7 @@ static void gfx_present(void) {
     bi.filter = sw == (Uint32)gfx.width && sh == (Uint32)gfx.height ? SDL_GPU_FILTER_NEAREST
                                                                      : SDL_GPU_FILTER_LINEAR;
     SDL_BlitGPUTexture(cb, &bi);
+    gfx.presents++;
 }
 
 /* A new event at the end of this frame's list. */
@@ -609,7 +612,9 @@ uint8_t gs_gfx_frame(void) {
         return 0;
     }
     /* The first call starts the first frame; every later one ends one. */
-    if (gfx.window && gfx.frames > 0) gfx_present();
+    if (gfx.window && gfx.frames > 0 && (!gfx.present_on_demand || gfx.present_requested)) {
+        gfx_present(); gfx.present_requested = false;
+    }
     gfx_submit();
     memset(gfx.pressed_keys, 0, sizeof gfx.pressed_keys);
     memset(gfx.released_keys, 0, sizeof gfx.released_keys);
@@ -674,6 +679,11 @@ uint8_t gs_gfx_frame(void) {
                 if (e.window.windowID == (gfx.window ? SDL_GetWindowID(gfx.window) : 0))
                     gfx_focus(e.type == SDL_EVENT_WINDOW_FOCUS_GAINED);
                 break;
+            case SDL_EVENT_WINDOW_EXPOSED:
+            case SDL_EVENT_WINDOW_RESTORED:
+            case SDL_EVENT_WINDOW_SHOWN:
+                if (gfx.window && e.window.windowID == SDL_GetWindowID(gfx.window)) gfx.present_requested = true;
+                break;
             case SDL_EVENT_WINDOW_RESIZED:
                 gfx_update_input_scale();
                 break;
@@ -704,6 +714,18 @@ uint8_t gs_gfx_frame(void) {
     gfx.frames++;
     return !gfx.quit;
 }
+
+/* Opt-in: render passes targeting the screen request presentation automatically.
+   Other screen writers (upload/compute/blit) call request_present explicitly. */
+void gs_gfx_present_on_demand(uint8_t on) {
+    if (!gfx_need_device("present_on_demand")) return;
+    gfx.present_on_demand = on != 0; gfx.present_requested = true;
+}
+void gs_gfx_request_present(void) { if (gfx_need_device("request_present")) { gfx.present_requested = true; gfx.screen_content_revision++; } }
+int64_t gs_gfx_present_count(void) { return gfx.presents; }
+int64_t gs_gfx_submit_count(void) { return gfx.submits; }
+int64_t gs_gfx_screen_revision(void) { return gfx.screen_revision; }
+int64_t gs_gfx_screen_content_revision(void) { return gfx.screen_content_revision; }
 
 double gs_gfx_time(void) {
     return gfx.dev ? (double)(SDL_GetTicksNS() - gfx.start_ns) / 1e9 : 0.0;

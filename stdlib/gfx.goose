@@ -337,6 +337,17 @@ fn frame() -> bool {
     check();
     running
 }
+// Opt-in for UI loops. Idle frame() polls input without presenting unchanged pixels.
+// Screen render passes request presentation; other screen writes must request it.
+// Expose/restore/show also request presentation. Continuous presentation is default.
+extern "gs_gfx_present_on_demand" fn present_on_demand(on: bool);
+extern "gs_gfx_request_present" fn request_present();
+extern "gs_gfx_present_count" fn present_count() -> i64;
+extern "gs_gfx_submit_count" fn submit_count() -> i64;
+// Changes whenever resize replaces the screen textures, even though handles stay.
+extern "gs_gfx_screen_revision" fn screen_revision() -> i64;
+// Screen render passes, recreation and explicit request_present advance this.
+extern "gs_gfx_screen_content_revision" fn screen_content_revision() -> i64;
 extern "gs_gfx_quit" fn quit();
 // Submits everything drawn so far and waits until the GPU has done it.
 extern "gs_gfx_flush" fn flush_raw();

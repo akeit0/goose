@@ -102,6 +102,8 @@ uint8_t gs_gfx_begin_pass(const gs_gfx_pass_desc *d) {
     if (!cb) return 0;
     gfx.pass = SDL_BeginGPURenderPass(cb, ct, (Uint32)t.ncolor, t.has_depth ? &dt : NULL);
     if (!gfx.pass) return gfx_sdl_fail("beginning a render pass");
+    for (int i = 0; i < t.ncolor; ++i)
+        if (d->color[i].id == gfx.screen.id || d->resolve[i].id == gfx.screen.id) { gfx.present_requested = true; gfx.screen_content_revision++; break; }
     gfx.targets = t;
     gfx.pipeline = NULL;
     gfx_reset_bindings();

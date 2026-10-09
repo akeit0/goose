@@ -120,6 +120,12 @@ typedef struct {
     X(int64_t, gs_gfx_misuse_count, (void)) \
     X(int64_t, gs_gfx_driver, (gs_gfx_bytes out)) \
     X(uint8_t, gs_gfx_frame, (void)) \
+    X(void, gs_gfx_present_on_demand, (uint8_t on)) \
+    X(void, gs_gfx_request_present, (void)) \
+    X(int64_t, gs_gfx_present_count, (void)) \
+    X(int64_t, gs_gfx_submit_count, (void)) \
+    X(int64_t, gs_gfx_screen_revision, (void)) \
+    X(int64_t, gs_gfx_screen_content_revision, (void)) \
     X(void, gs_gfx_quit, (void)) \
     X(void, gs_gfx_flush, (void)) \
     X(void, gs_gfx_set_title, (gs_gfx_bytes title)) \

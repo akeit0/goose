@@ -125,6 +125,8 @@ typedef struct {
        ends. Its handles stay the same when a resize replaces the textures. */
     gs_gfx_texture screen, screen_depth;
     int width, height;
+    bool present_on_demand, present_requested;
+    int64_t presents, submits, screen_revision, screen_content_revision;
 
     /* Recording. Uploads and readbacks use command buffers of their own. */
     SDL_GPUCommandBuffer *cmd;
