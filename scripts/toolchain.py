@@ -191,7 +191,8 @@ def msvc_root():
                / "Microsoft Visual Studio" / "Installer" / "vswhere.exe")
     if not vswhere.exists():
         return None
-    r = subprocess.run([str(vswhere), "-latest", "-prerelease",
+    r = subprocess.run([str(vswhere), "-latest", "-prerelease", "-products", "*",
+                        "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
                         "-property", "installationPath"],
                        capture_output=True, text=True, errors="replace")
     lines = [l for l in r.stdout.splitlines() if l.strip()]
@@ -205,6 +206,8 @@ def msvc_root():
     # the backslash-escaped quotes that the list form would produce.
     env = subprocess.run(f'"{vcvars}" >nul 2>&1 && set', shell=True,
                          capture_output=True, text=True, errors="replace")
+    if env.returncode != 0:
+        return None
     for line in env.stdout.splitlines():
         key, sep, val = line.partition("=")
         if sep:
