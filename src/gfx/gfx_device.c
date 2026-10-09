@@ -12,6 +12,7 @@ gfx_state gfx;
 /* How many times gfx was opened, which close() leaves: handles from an
    earlier open are gone once it changes. */
 static int64_t gfx_opens;
+static uint32_t gfx_text_epoch;
 
 /* --- errors ---------------------------------------------------------------- */
 
@@ -447,7 +448,8 @@ void gs_gfx_close(void) {
         SDL_DestroyGPUDevice(gfx.dev);
     }
     free(gfx.events);
-    for (int i = 0; i < gfx.ninjected; i++) SDL_free(gfx.injected[i]);
+    free(gfx.text_bytes); ++gfx_text_epoch;
+    for (int i = 0; i < gfx.ninjected; i++) SDL_free(gfx.injected[i].text);
     free(gfx.injected);
     SDL_free(gfx.clipboard);
     if (gfx.window) {
@@ -456,6 +458,7 @@ void gs_gfx_close(void) {
         SDL_DestroyWindow(gfx.window);
     }
     if (gfx.video_inited) SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    if (gfx.text_transactions) SDL_ResetHint(SDL_HINT_IME_IMPLEMENTED_UI);
     /* What went wrong outlives the device, for gs_gfx_error after a failed
        open. */
     char error[sizeof gfx.error];
@@ -542,8 +545,29 @@ static int32_t gfx_mods(void) {
 }
 
 /* One text event per character of UTF-8 `text`. */
+static void gfx_text_transaction(const char *text, bool editing, int32_t start, int32_t length) {
+    if (!text) text = "";
+    gs_gfx_event *e = gfx_event(editing ? GS_GFX_EVENT_TEXT_EDITING : GS_GFX_EVENT_TEXT_COMMIT);
+    e->start = start; e->length = length;
+    size_t n = strlen(text);
+    if (n > 65532 || gfx.text_len > 65536 - 4 - n) return; /* zero token: explicit rejection */
+    uint32_t needed = gfx.text_len + 4 + (uint32_t)n;
+    if (needed > gfx.text_cap) {
+        uint32_t cap = gfx.text_cap ? gfx.text_cap : 1024;
+        while (cap < needed) cap *= 2;
+        uint8_t *bytes = (uint8_t *)realloc(gfx.text_bytes, cap);
+        if (!bytes) return;
+        gfx.text_bytes = bytes; gfx.text_cap = cap;
+    }
+    uint32_t count = (uint32_t)n;
+    memcpy(gfx.text_bytes + gfx.text_len, &count, 4);
+    memcpy(gfx.text_bytes + gfx.text_len + 4, text, n);
+    e->text = ((uint64_t)gfx_text_epoch << 32) | (gfx.text_len + 1);
+    gfx.text_len = needed;
+}
 static void gfx_text_events(const char *text) {
     if (!text) return;
+    if (gfx.text_transactions) { gfx_text_transaction(text, false, -1, -1); return; }
     Uint32 cp;
     while ((cp = SDL_StepUTF8(&text, NULL)) != 0)
         gfx_event(GS_GFX_EVENT_TEXT)->codepoint = cp;
@@ -621,6 +645,7 @@ uint8_t gs_gfx_frame(void) {
     gfx.pressed_buttons = gfx.released_buttons = 0;
     gfx.mouse_dx = gfx.mouse_dy = gfx.wheel = 0;
     gfx.nevents = 0;
+    gfx.text_len = 0; if (++gfx_text_epoch == 0) ++gfx_text_epoch;
     bool resized = false;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -636,6 +661,9 @@ uint8_t gs_gfx_frame(void) {
             } break;
             case SDL_EVENT_TEXT_INPUT:
                 if (gfx.focused) gfx_text_events(e.text.text);
+                break;
+            case SDL_EVENT_TEXT_EDITING:
+                if (gfx.focused && gfx.text_transactions) gfx_text_transaction(e.edit.text, true, e.edit.start, e.edit.length);
                 break;
             case SDL_EVENT_MOUSE_MOTION: {
                 if (!gfx.focused) break;
@@ -694,9 +722,13 @@ uint8_t gs_gfx_frame(void) {
             default:
                 if (gfx.inject_event && e.type == gfx.inject_event && e.user.code >= 0 &&
                     e.user.code < gfx.ninjected) {
-                    if (gfx.focused) gfx_text_events(gfx.injected[e.user.code]);
-                    SDL_free(gfx.injected[e.user.code]);
-                    gfx.injected[e.user.code] = NULL;
+                    if (gfx.focused) {
+                        if (gfx.injected[e.user.code].editing) {
+                            if (gfx.text_transactions) gfx_text_transaction(gfx.injected[e.user.code].text, true, gfx.injected[e.user.code].start, gfx.injected[e.user.code].length);
+                        } else gfx_text_events(gfx.injected[e.user.code].text);
+                    }
+                    SDL_free(gfx.injected[e.user.code].text);
+                    gfx.injected[e.user.code].text = NULL;
                 }
                 break;
         }
@@ -935,21 +967,51 @@ int64_t gs_gfx_events(gs_gfx_event_slice out) {
 
 void gs_gfx_text_input(uint8_t on) {
     if (!gfx_need_device("text_input") || !gfx.window) return;
+    if (SDL_TextInputActive(gfx.window) == (on != 0)) return;
     if (on) SDL_StartTextInput(gfx.window);
     else SDL_StopTextInput(gfx.window);
+}
+void gs_gfx_text_transactions(uint8_t on) {
+    if (gfx.text_transactions == (on != 0)) return;
+    /* Configure before open for portable IME setup; candidates stay native. */
+    SDL_SetHint(SDL_HINT_IME_IMPLEMENTED_UI, on ? "composition" : "none");
+    gfx.text_transactions = on != 0;
+}
+int64_t gs_gfx_text_event(uint64_t token, gs_gfx_bytes out) {
+    if (!token || (uint32_t)(token >> 32) != gfx_text_epoch) return -1;
+    uint32_t at = (uint32_t)token - 1, n;
+    if (at > gfx.text_len || gfx.text_len - at < 4) return -1;
+    memcpy(&n, gfx.text_bytes + at, 4);
+    if (n > gfx.text_len - at - 4) return -1;
+    int64_t k = (int64_t)n < out.len ? n : out.len;
+    if (k > 0) memcpy(out.data, gfx.text_bytes + at + 4, (size_t)k);
+    return n;
+}
+void gs_gfx_clear_composition(void) { if (gfx.window) SDL_ClearComposition(gfx.window); }
+void gs_gfx_text_input_area(float x, float y, float w, float h, float cursor) {
+    if (!gfx.window || !isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h) || !isfinite(cursor)) return;
+    float sx = gfx.window_pw > 0 ? (float)gfx.window_w / gfx.window_pw : 1;
+    float sy = gfx.window_ph > 0 ? (float)gfx.window_h / gfx.window_ph : 1;
+    SDL_Rect rect = { (int)floorf(x * sx), (int)floorf(y * sy), (int)ceilf(fmaxf(1, w * sx)), (int)ceilf(fmaxf(1, h * sy)) };
+    int offset = (int)roundf(cursor * sx);
+    if (gfx.text_area_valid && memcmp(&rect, &gfx.text_area, sizeof rect) == 0 && offset == gfx.text_cursor) return;
+    if (SDL_SetTextInputArea(gfx.window, &rect, offset)) { gfx.text_area = rect; gfx.text_cursor = offset; gfx.text_area_valid = true; }
 }
 
 /* Text as if typed, seen at the next frame(): a user event in the queue
    keeps its place among injected keys and clicks. */
-uint8_t gs_gfx_inject_text(gs_gfx_bytes text) {
+static uint8_t gfx_inject_text(gs_gfx_bytes text, bool editing, int32_t start, int32_t length) {
     if (!gfx_need_device("inject_text")) return 0;
     if (!gfx.inject_event) return gfx_fail("inject_text: SDL has no user event left");
     if (gfx.ninjected == gfx.injected_cap) {
-        gfx.injected_cap = gfx.injected_cap ? gfx.injected_cap * 2 : 8;
-        gfx.injected = (char **)realloc(gfx.injected, sizeof(char *) * (size_t)gfx.injected_cap);
+        int cap = gfx.injected_cap ? gfx.injected_cap * 2 : 8;
+        void *next = realloc(gfx.injected, sizeof(*gfx.injected) * (size_t)cap);
+        if (!next) return 0;
+        gfx.injected = next; gfx.injected_cap = cap;
     }
     size_t n = text.len > 0 ? (size_t)text.len : 0;
     char *copy = (char *)SDL_malloc(n + 1);
+    if (!copy) return 0;
     if (n) memcpy(copy, text.data, n);
     copy[n] = 0;
     SDL_Event e;
@@ -957,9 +1019,15 @@ uint8_t gs_gfx_inject_text(gs_gfx_bytes text) {
     e.type = gfx.inject_event;
     e.user.timestamp = SDL_GetTicksNS();
     e.user.code = gfx.ninjected;
-    gfx.injected[gfx.ninjected++] = copy;
-    return SDL_PushEvent(&e);
+    gfx.injected[gfx.ninjected].text = copy;
+    gfx.injected[gfx.ninjected].editing = editing;
+    gfx.injected[gfx.ninjected].start = start; gfx.injected[gfx.ninjected].length = length;
+    gfx.ninjected++;
+    if (SDL_PushEvent(&e)) return 1;
+    SDL_free(copy); gfx.ninjected--; return 0;
 }
+uint8_t gs_gfx_inject_text(gs_gfx_bytes text) { return gfx_inject_text(text, false, -1, -1); }
+uint8_t gs_gfx_inject_editing(gs_gfx_bytes text, int32_t start, int32_t length) { return gfx_inject_text(text, true, start, length); }
 
 int64_t gs_gfx_scancode(gs_gfx_bytes name) {
     char buf[64];

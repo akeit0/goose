@@ -180,6 +180,8 @@ let EVENT_MOUSE_BUTTON: i32 = 4;
 let EVENT_MOUSE_WHEEL: i32 = 5;
 let EVENT_FOCUS_GAINED: i32 = 6;
 let EVENT_FOCUS_LOST: i32 = 7;
+let EVENT_TEXT_EDITING: i32 = 8;
+let EVENT_TEXT_COMMIT: i32 = 9;
 let MOD_SHIFT: i32 = 1;
 let MOD_CTRL: i32 = 2;
 let MOD_ALT: i32 = 4;
@@ -266,6 +268,8 @@ struct Event {
     codepoint: u32,         // text: one character typed
     x: f32,                 // motion, button: where the pointer is, in pixels; wheel: how far
     y: f32,
+    text: u64,             // frame-local token; copy before the next frame/close
+    start: i32, length: i32, // editing selection in scalars (-1 if unset)
 }
 
 struct PassDesc {
@@ -468,6 +472,17 @@ fn events() -> Event[>..] {
 // Typed text comes as EVENT_TEXT only while text input is on: off by
 // default, since on some platforms it shows an on-screen keyboard.
 extern "gs_gfx_text_input" fn text_input(on: bool);
+// Opt into one UTF-8 commit event per SDL text input, plus IME preedit events.
+// Default clients keep receiving one EVENT_TEXT per scalar.
+// Call before open: SDL must know that composition is painted by the client.
+extern "gs_gfx_text_transactions" fn text_transactions(on: bool);
+// Returns full byte count, copies the fitting prefix, or -1 for an invalid token.
+// Payloads share a lazy 64 KiB frame arena. Token zero signals overflow.
+extern "gs_gfx_text_event" fn text_event_into(token: u64, out: u8[:]) -> i64;
+extern "gs_gfx_clear_composition" fn clear_composition();
+// Screen pixels; the platform converts to window coordinates, including DPI.
+extern "gs_gfx_text_input_area" fn text_input_area(x: f32, y: f32, w: f32, h: f32, cursor: f32);
+extern "gs_gfx_inject_editing" fn inject_editing(text: const u8[:], start: i32, length: i32) -> bool;
 // The scancode of the key of that name, as key_down takes it, 0 for none;
 // and the name the platform has for a key, as a label to show.
 extern "gs_gfx_scancode" fn scancode(name: const u8[:]) -> i64;

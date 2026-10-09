@@ -52,6 +52,8 @@ typedef struct {
     int32_t clicks;             /* button: 1, 2 for a double click, ... */
     uint32_t codepoint;         /* text: one character typed */
     float x, y;                 /* motion, button: where the pointer is; wheel: how far */
+    uint64_t text;              /* frame-local UTF-8 token: text_event_into copies it */
+    int32_t start, length;      /* editing: selection in Unicode scalars, -1 if unset */
 } gs_gfx_event;
 
 typedef struct { gs_gfx_buffer *data; int64_t len; } gs_gfx_buffer_slice;
@@ -158,6 +160,11 @@ typedef struct {
     X(void, gs_gfx_inject_mouse, (float x, float y, int64_t button, uint8_t down)) \
     X(int64_t, gs_gfx_events, (gs_gfx_event_slice out)) \
     X(void, gs_gfx_text_input, (uint8_t on)) \
+    X(void, gs_gfx_text_transactions, (uint8_t on)) \
+    X(int64_t, gs_gfx_text_event, (uint64_t token, gs_gfx_bytes out)) \
+    X(void, gs_gfx_clear_composition, (void)) \
+    X(void, gs_gfx_text_input_area, (float x, float y, float w, float h, float cursor)) \
+    X(uint8_t, gs_gfx_inject_editing, (gs_gfx_bytes text, int32_t start, int32_t length)) \
     X(uint8_t, gs_gfx_inject_text, (gs_gfx_bytes text)) \
     X(int64_t, gs_gfx_scancode, (gs_gfx_bytes name)) \
     X(int64_t, gs_gfx_key_name, (int64_t scancode, gs_gfx_bytes out)) \
@@ -331,6 +338,8 @@ GS_GFX_API(GS_GFX_PROTO)
     X(i32, EVENT_MOUSE_WHEEL, 5) \
     X(i32, EVENT_FOCUS_GAINED, 6) \
     X(i32, EVENT_FOCUS_LOST, 7) \
+    X(i32, EVENT_TEXT_EDITING, 8) \
+    X(i32, EVENT_TEXT_COMMIT, 9) \
     X(i32, MOD_SHIFT, 1) \
     X(i32, MOD_CTRL, 2) \
     X(i32, MOD_ALT, 4) \

@@ -160,10 +160,16 @@ typedef struct {
     int window_w, window_h, window_pw, window_ph;
     /* This frame's events in order, for gs_gfx_events. */
     gs_gfx_event *events;
+    uint8_t *text_bytes;
+    uint32_t text_len, text_cap;
+    bool text_transactions;
+    SDL_Rect text_area;
+    int text_cursor;
+    bool text_area_valid;
     int64_t nevents, events_cap;
     /* Text injected and not yet seen: a user event of type inject_event
        carries its index, so it comes in order with injected keys. */
-    char **injected;
+    struct { char *text; int32_t start, length; bool editing; } *injected;
     int ninjected, injected_cap;
     uint32_t inject_event;
     /* The clipboard without a window: no one else is at it. */
