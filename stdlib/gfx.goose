@@ -182,6 +182,7 @@ let EVENT_FOCUS_GAINED: i32 = 6;
 let EVENT_FOCUS_LOST: i32 = 7;
 let EVENT_TEXT_EDITING: i32 = 8;
 let EVENT_TEXT_COMMIT: i32 = 9;
+let EVENT_CLOSE_REQUESTED: i32 = 10;
 let MOD_SHIFT: i32 = 1;
 let MOD_CTRL: i32 = 2;
 let MOD_ALT: i32 = 4;
@@ -335,6 +336,7 @@ fn driver() -> u8[>..] {
 // window, and handles the window's events: false once it has been asked to
 // close, or quit() was called. Called at the top of the loop, before the
 // first frame is drawn.
+// With defer_close(true), native close/quit requests become ordered events instead.
 extern "gs_gfx_frame" fn frame_raw() -> bool;
 fn frame() -> bool {
     let running = frame_raw();
@@ -353,6 +355,10 @@ extern "gs_gfx_screen_revision" fn screen_revision() -> i64;
 // Screen render passes, recreation and explicit request_present advance this.
 extern "gs_gfx_screen_content_revision" fn screen_content_revision() -> i64;
 extern "gs_gfx_quit" fn quit();
+// Opt-in for editors: keep processing frames until the application approves exit.
+// Explicit quit() still ends frame(). Default close behavior is unchanged.
+extern "gs_gfx_defer_close" fn defer_close(on: bool);
+extern "gs_gfx_inject_close" fn inject_close() -> bool;
 // Submits everything drawn so far and waits until the GPU has done it.
 extern "gs_gfx_flush" fn flush_raw();
 fn flush() {

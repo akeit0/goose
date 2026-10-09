@@ -146,6 +146,7 @@ typedef struct {
     /* Input: held state plus every transition seen in this frame. A tap
        between frames sets both pressed and released, even though it ends released. */
     bool quit;
+    bool defer_close;
     uint8_t keys[SDL_SCANCODE_COUNT];
     uint8_t pressed_keys[SDL_SCANCODE_COUNT], released_keys[SDL_SCANCODE_COUNT];
     uint32_t buttons, pressed_buttons, released_buttons;

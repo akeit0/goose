@@ -487,6 +487,13 @@ void gs_gfx_set_title(gs_gfx_bytes title) {
 }
 
 void gs_gfx_quit(void) { gfx.quit = true; }
+void gs_gfx_defer_close(uint8_t on) { gfx.defer_close = on != 0; }
+uint8_t gs_gfx_inject_close(void) {
+    if (!gfx_need_device("inject_close")) return 0;
+    SDL_Event e; SDL_zero(e); e.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+    e.window.windowID = gfx.window ? SDL_GetWindowID(gfx.window) : 0;
+    return SDL_PushEvent(&e);
+}
 
 /* --- frames ------------------------------------------------------------------ */
 
@@ -651,8 +658,13 @@ uint8_t gs_gfx_frame(void) {
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
             case SDL_EVENT_QUIT:
+                if (gfx.defer_close) gfx_event(GS_GFX_EVENT_CLOSE_REQUESTED);
+                else gfx.quit = true;
+                break;
             case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-                gfx.quit = true;
+                if (e.window.windowID != (gfx.window ? SDL_GetWindowID(gfx.window) : 0)) break;
+                if (gfx.defer_close) gfx_event(GS_GFX_EVENT_CLOSE_REQUESTED);
+                else gfx.quit = true;
                 break;
             case SDL_EVENT_KEY_DOWN:
             case SDL_EVENT_KEY_UP: {

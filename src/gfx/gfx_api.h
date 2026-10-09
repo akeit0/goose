@@ -122,6 +122,8 @@ typedef struct {
     X(int64_t, gs_gfx_misuse_count, (void)) \
     X(int64_t, gs_gfx_driver, (gs_gfx_bytes out)) \
     X(uint8_t, gs_gfx_frame, (void)) \
+    X(void, gs_gfx_defer_close, (uint8_t on)) \
+    X(uint8_t, gs_gfx_inject_close, (void)) \
     X(void, gs_gfx_present_on_demand, (uint8_t on)) \
     X(void, gs_gfx_request_present, (void)) \
     X(int64_t, gs_gfx_present_count, (void)) \
@@ -340,6 +342,7 @@ GS_GFX_API(GS_GFX_PROTO)
     X(i32, EVENT_FOCUS_LOST, 7) \
     X(i32, EVENT_TEXT_EDITING, 8) \
     X(i32, EVENT_TEXT_COMMIT, 9) \
+    X(i32, EVENT_CLOSE_REQUESTED, 10) \
     X(i32, MOD_SHIFT, 1) \
     X(i32, MOD_CTRL, 2) \
     X(i32, MOD_ALT, 4) \
