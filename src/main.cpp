@@ -341,7 +341,7 @@ int Main(int argc, char **argv) {
     auto nobce = false, bcetest = false, bcelines = false, norfcheck = false;
     auto forcejit = false, standalone = false;
     auto optlevel = 1;
-    vector<string> cdefines, progargs, includenames, files;
+    vector<string> cdefines, progargs, includenames, files, moduledirs;
     for (int i = 1; i < argc; i++) {
         string arg = argv[i];
         // Everything past `--` belongs to the program being run, not here.
@@ -404,6 +404,8 @@ int Main(int argc, char **argv) {
         else if (arg == "--header" && i + 1 < argc) headername = argv[++i];
         else if (arg == "--include" && i + 1 < argc) includenames.push_back(argv[++i]);
         else if (arg == "--stdlib" && i + 1 < argc) stdlibdir = argv[++i];
+        else if ((arg == "--module-dir" || arg == "-I") && i + 1 < argc)
+            moduledirs.push_back(cat(argv[++i], "/"));
         // A -D lands in the generated C itself rather than on some backend's
         // command line, so a JIT run and a compiled one see the same source.
         else if (arg == "-D" && i + 1 < argc) cdefines.push_back(argv[++i]);
@@ -433,7 +435,7 @@ int Main(int argc, char **argv) {
                         "[--no-bce] [--bce-test] [--bce-lines] [--unsafe-no-rf-check] [-O0|-O1|-O2] "
                         "[-o out.c [--standalone]] [--jit] [-DNAME=VALUE]... [--include header.h]... "
                         "[--header out.h] "
-                        "[--stdlib dir] file.goose [-- program args...] | "
+                        "[--stdlib dir] [--module-dir dir]... file.goose [-- program args...] | "
                         "--multi-test [options] file.goose... | --emit-runtime runtime.c | "
                         "--gen-runtime-header | "
                         "--audio-link msvc|cc | --gfx-link msvc|cc | "
@@ -484,6 +486,9 @@ int Main(int argc, char **argv) {
         }
         Ast ast;
         auto stdlibdirs = StdlibDirs(stdlibdir, argv[0]);
+        // Project modules resolve after the root directory, before stdlib.
+        // Preserve order so repeatable --module-dir works like a search path.
+        stdlibdirs.insert(stdlibdirs.begin(), moduledirs.begin(), moduledirs.end());
         ParseProgram(ast, filename, stdlibdirs);
         if (dump) {
             // Dump is parse-level output: no name resolution or typecheck,

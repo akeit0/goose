@@ -3108,7 +3108,9 @@ the caller's own facts about `src` intact.
 ### 11.1 Modules and globals
 
 * One program, compiled whole. `import a.b.c;` includes the file `a/b/c.goose`
-  once, resolved relative to the *main file being compiled*, then in the
+  once, resolved relative to the *main file being compiled*, then in each
+  project directory passed with repeatable `--module-dir <dir>` (or `-I <dir>`)
+  in command-line order, then in the
   standard library's directory (`--stdlib <dir>`, else `GOOSE_STDLIB`, else
   the `stdlib/` of the source tree the compiler was built in); the form
   `import .a.b;` (leading dot) resolves relative to the *importing file*

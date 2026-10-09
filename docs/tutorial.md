@@ -75,6 +75,12 @@ what you want while you are reading this:
 goose hello.goose
 ```
 
+Project libraries can live outside the standard library. Pass one or more
+`--module-dir path/to/lib` options (short form `-I path/to/lib`): an
+`import library.http;` searches for `library/http.goose` next to the root program, then
+in those directories in order, then in the standard library. Relative
+imports (`import .helper;`) still resolve next to the importing file.
+
 Here is a minimal program:
 
 ```goose
