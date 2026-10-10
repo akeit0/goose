@@ -158,7 +158,7 @@ inline bool CodeGen::IsFatRef(TypeExpr *t) {
 // reference, or one reachable from the value -- in a field, a payload, an
 // element, or behind a slice or a plain reference. Code handed such a value
 // can grow that stack without the value's name saying which stack it is
-// (PassesOpaqueStack, SyncReach). A nominal type reached again on the way
+// (SyncReach). A nominal type reached again on the way
 // through itself has no further fat reference to offer, so `open` cuts the
 // recursion there.
 inline bool CodeGen::HoldsFatRef(TypeExpr *t) {
@@ -474,10 +474,27 @@ inline string CodeGen::CT(TypeExpr *t) {
     auto name = NameCT(t);
     auto m = Mangle(t);
     if (cdefined.count(m)) return name;
+    // A variant's struct is a member of its enum's union. Emitting the enum
+    // emits each variant's body ahead of the enum's own, also where a payload
+    // names the enum again (through a slice), so a variant starts there.
+    if (t->kind == TY_VARIANT && EIVar(t)->allfixed) {
+        CT(t->var->adt);
+        if (cdefined.count(m)) return name;
+    }
     cdefined.insert(m);   // Before the body: recursion terminates via refs.
     string d;
     switch (t->kind) {
         case TY_SLICE: {
+            if (StructLike(t->sub) && !IsBytesT(t->sub)) {
+                // Like a reference, a slice needs only its element's name, and
+                // the element's body may hold this slice (a node type with a
+                // slice of its children): the typedef goes first, the body
+                // after it.
+                Append(tdecls, "typedef struct { ", NameCT(t->sub), " *data; int64_t len; } ",
+                       name, ";\n\n");
+                CT(t->sub);
+                return name;
+            }
             auto e = IsBytesT(t->sub) ? string("uint8_t") : CT(t->sub);
             // Optional native adapters may need primitive slice types even
             // when this program does not call the corresponding extern.
@@ -1156,8 +1173,8 @@ inline void CodeGen::EmitDefaultInto(const string &lv, TypeExpr *t) {
 
 // ------------------------------------------------------------------
 // Structural equality (§4.5): gs_eq_<mangle>. Fixed values pass by value,
-// bytes values as pointers. Gap-free fixed types without floats shortcut
-// to memcmp.
+// bytes values as pointers. Gap-free fixed types without floats of more
+// than a few scalars shortcut to memcmp.
 
 inline bool CodeGen::BitwiseEq(TypeExpr *t) {
     if (!IsFix(t)) return false;
@@ -1181,6 +1198,29 @@ inline bool CodeGen::ScalarEq(TypeExpr *t) {
            (t->kind == TY_REF && t->ref->lenstorage < 0 && !IsFatRef(t));
 }
 
+// How many scalars an equality test of fixed type t compares, counting
+// no further than cap. A leaf EqX has no comparison of its own for (a
+// relative reference, a function) counts as cap, which keeps memcmp.
+inline int64_t CodeGen::EqScalars(TypeExpr *t, int64_t cap) {
+    switch (t->kind) {
+        case TY_STRUCT: case TY_VARIANT: {
+            int64_t n = 0;
+            for (auto &run : FieldRuns(t))
+                for (size_t i = 0; i < run.fields->size() && n < cap; i++)
+                    if (!(*run.fields)[i].ispad) n += EqScalars((*run.ftypes)[i], cap - n);
+            return min(n, cap);
+        }
+        case TY_ARRAY: {
+            auto per = EqScalars(t->arr->sub, cap);
+            auto size = ArrSize(t->arr);
+            return per && size > cap / per ? cap : per * size;
+        }
+        default:
+            return ScalarEq(t) || (t->kind == TY_REF && IsFatRef(t)) ||
+                   (t->kind == TY_SLICE && !IsBytesT(t->sub)) ? 1 : cap;
+    }
+}
+
 // Equality of two values as a C expression; a/b are values (fixed) or
 // byte pointers (bytes-class). May emit an eq function.
 inline string CodeGen::EqX(TypeExpr *t, const string &a, const string &b) {
@@ -1190,7 +1230,11 @@ inline string CodeGen::EqX(TypeExpr *t, const string &a, const string &b) {
     if (t->kind == TY_SLICE && !IsBytesT(t->sub))
         return cat("(", a, ".data == ", b, ".data && ", a, ".len == ", b, ".len)");
     if (IsFix(t)) {
-        if (BitwiseEq(t))
+        // A few scalars compare one by one, in an eq function the C compiler
+        // inlines. Through memcmp, an operand just built in registers would
+        // be stored field by field and read back in one wider load, which
+        // store forwarding cannot serve.
+        if (BitwiseEq(t) && EqScalars(t, 5) > 4)
             return cat("(memcmp(&", a, ", &", b, ", ", FixedSize(t), ") == 0)");
         return cat(EqFn(t), "(&", a, ", &", b, ")");
     }
@@ -1262,6 +1306,38 @@ inline void CodeGen::EmitEqFixed(string &bo, TypeExpr *t) {
                 Append(bo, "    for (int64_t i = 0; i < ", ArrSize(t->arr), "; i++)\n",
                        "        if (!", EqX(a.sub, "a->e[i]", "b->e[i]"), ") return 0;\n",
                        "    return 1;\n");
+            } else if (BitwiseEq(a.sub) && ArrSize(t->arr) > 0) {
+                // Limited, static capacity, of elements equal exactly when
+                // their bytes are: the live bytes compared as a run.
+                auto esz = FixedSize(a.sub);
+                auto bytes = ArrSize(t->arr) * esz;
+                auto lw = IntSize(LenStore(t->arr));
+                Append(bo, "    if (a->len != b->len) return 0;\n");
+                if (bytes <= 64 && lw + bytes >= 8) {
+                    // Whole words over the value's own storage, the bytes
+                    // past the length masked off: no branch on the data.
+                    // A last word that would end past the slots ends at the
+                    // value's end instead, starting inside the slots or the
+                    // length before them, both equal on both sides by now.
+                    Append(bo, "    int64_t n = (int64_t)a->len * ", esz, ";\n",
+                           "    const uint8_t *pa = (const uint8_t *)a->e, ",
+                           "*pb = (const uint8_t *)b->e;\n",
+                           "    uint64_t d = 0;\n");
+                    auto word = [&](int64_t w) {
+                        auto at = w < 0 ? cat(" - ", -w) : w ? cat(" + ", w) : string();
+                        Append(bo, "    d |= (gs_ld64(pa", at, ") ^ gs_ld64(pb", at,
+                               ")) & gs_bytemask(n", w < 0 ? cat(" + ", -w) : w ? cat(" - ", w)
+                                                                             : string(),
+                               ");\n");
+                    };
+                    int64_t w = 0;
+                    for (; w + 8 <= bytes; w += 8) word(w);
+                    if (w < bytes) word(bytes - 8);
+                    Append(bo, "    return d == 0;\n");
+                } else {
+                    Append(bo, "    return gs_memeq(a->e, b->e, (size_t)a->len * ", esz,
+                           ");\n");
+                }
             } else {   // Limited, static capacity.
                 Append(bo, "    if (a->len != b->len) return 0;\n",
                        "    for (int64_t i = 0; i < (int64_t)a->len; i++)\n",

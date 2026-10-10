@@ -150,7 +150,7 @@ inline vector<Node *> CodeGen::CallArgNodes(Call *c, size_t nparams) {
 inline void CodeGen::EmitArg(FnSpec *sp, size_t i, Node *node, vector<string> &args) {
     auto pt = sp->argtypes[i];
     if (IsPoolParam(sp, i)) {
-        args.push_back(GenPrefVal(node));
+        PushArg(args, pt, true, GenPrefVal(node));
         return;
     }
     if (IsResz(pt)) {
@@ -178,12 +178,13 @@ inline void CodeGen::EmitArg(FnSpec *sp, size_t i, Node *node, vector<string> &a
     if (pt->kind == TY_REF && pt->ref->lenstorage >= 0) {
         auto t = T();
         L(CT(pt), " ", t, ";");
-        EmitRelStoreAt(cat("(uint8_t *)&", t), pt, GenX(node), node->line, true);
+        EmitRelStoreAt(cat("(uint8_t *)&", t), pt, GenX(node), node->line, true, RelValue(node));
         args.push_back(t);
         return;
     }
     auto value = Snapshot(pt, GenXD(node, pt));
-    args.push_back(IsLargeFixed(pt) ? cat("&", value) : value);
+    if (IsLargeFixed(pt)) args.push_back(cat("&", value));
+    else PushArg(args, pt, false, value);
 }
 
 // A free variable of the callee, from the caller's frame (or passed on).
@@ -198,9 +199,9 @@ inline void CodeGen::EmitFvArg(const VarDef *fv, vector<string> &args) {
             auto t = T();
             L("gs_pref ", t, " = { &", name, ", ", vstk[fv], ", &", p.first, ", ",
               p.second, " };");
-            args.push_back(t);
+            PushArg(args, fv->type, true, t);
         } else {
-            args.push_back(name);
+            PushArg(args, fv->type, true, name);
         }
         return;
     }
@@ -241,7 +242,7 @@ inline vector<string> CodeGen::EmitSpecCall(Call *c, FnSpec *sp, Dst d0, vector<
     Dst reprefix;
     vector<string> args;
     for (size_t i = 0; i < an.size(); i++) EmitArg(sp, i, an[i], args);
-    for (auto fv : ki.freevars) EmitFvArg(fv, args);
+    for (auto fv : ki.freevars) EmitFvArg(c->FreeVarArg(fv), args);
     vector<string> retex(sp->rets.size());
     for (size_t i = 0; i < sp->rets.size(); i++) {
         auto rt = sp->rets[i];
@@ -321,12 +322,16 @@ inline vector<string> CodeGen::EmitSpecCall(Call *c, FnSpec *sp, Dst d0, vector<
             }
         }
     }
-    if (ki.needssp) args.push_back(SpTop());
+    if (ki.needssp) {
+        NoStackAcrossCycleCall(sp, c->line);
+        NoteStackCall(sp, c->line);
+        args.push_back(SpTop());
+    }
     string argstr;
     for (size_t i = 0; i < args.size(); i++) Append(argstr, i ? ", " : "", args[i]);
     auto callee = ername.empty() ? ki.cname : ername;
     // The callee reads and bumps the stacks it was handed, and no others.
-    auto reach = SyncReach(sp, args);
+    auto reach = SyncReach(sp, args, an);
     MarkFlush(reach);
     if (ki.cret >= 0) {
         auto r0 = T();
@@ -678,17 +683,19 @@ inline vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst
         // Assemble the arm's call.
         vector<string> args;
         for (size_t i = 0; i < an.size(); i++) {
+            auto pt = sp->argtypes[i];
+            auto &v = (int)i == pos ? varg : shared[i];
+            if (IsLargeFixed(pt)) args.push_back(cat("&", v));
+            else if (IsResz(pt)) args.push_back(v);
+            else PushArg(args, pt, IsPoolParam(sp, i), v);
             if ((int)i == pos) {
-                args.push_back(IsLargeFixed(sp->argtypes[i]) ? cat("&", varg) : varg);
-                if (IsBytesT(sp->argtypes[i]) && IsResz(sp->argtypes[i]))
+                if (IsBytesT(pt) && IsResz(pt))
                     Fail(c->line, "resizable by-value dispatch payloads are unsupported");
-            } else {
-                args.push_back(IsLargeFixed(sp->argtypes[i]) ? cat("&", shared[i]) : shared[i]);
-                if (IsBytesT(sp->argtypes[i]) && IsResz(sp->argtypes[i]))
-                    args.push_back(sharedstk[i]);
+            } else if (IsBytesT(pt) && IsResz(pt)) {
+                args.push_back(sharedstk[i]);
             }
         }
-        for (auto fv : ki.freevars) EmitFvArg(fv, args);
+        for (auto fv : ki.freevars) EmitFvArg(c->FreeVarArg(fv), args);
         for (size_t i = 0; i < sp->rets.size(); i++) {
             if (IsResz(sp->rets[i])) {
                 args.push_back(dststk[i]);
@@ -696,10 +703,14 @@ inline vector<string> CodeGen::EmitDispatch(Call *c, Dst d0, vector<Dst> *alldst
             } else if (IsBytesT(sp->rets[i])) args.push_back(dststk[i]);
             else if ((int)i != ki.cret) args.push_back(cat("&", retex[i]));
         }
-        if (ki.needssp) args.push_back(SpTop());
+        if (ki.needssp) {
+            NoStackAcrossCycleCall(sp, c->line);
+            NoteStackCall(sp, c->line);
+            args.push_back(SpTop());
+        }
         string argstr;
         for (size_t i = 0; i < args.size(); i++) Append(argstr, i ? ", " : "", args[i]);
-        auto reach = SyncReach(sp, args);
+        auto reach = SyncReach(sp, args, an);
         MarkFlush(reach);
         if (ki.cret >= 0) L(retex[ki.cret], " = ", ki.cname, "(", argstr, ");");
         else L(ki.cname, "(", argstr, ");");

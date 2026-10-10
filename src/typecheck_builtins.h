@@ -52,8 +52,10 @@ inline Val TypeCheck::CheckBuiltin(Call *c, const BuiltinDef &d, vector<Node *> 
         case B_THREAD_SPAWN: {
             auto wid = Is<Ident>(args[0]);
             SFunction *wsf = nullptr;
-            // A variable, type parameter or nested function of the name hides it (§11.1).
-            if (wid && !LookupVar(wid->name, wid->ns) && !ScopeNameKind(wid->name))
+            // A variable in scope, a type parameter or a nested function of the
+            // name hides it, as at a call (§11.1).
+            auto wvd = wid ? LookupVar(wid->name, wid->ns) : nullptr;
+            if (wid && !(wvd && !wvd->isglobal) && !ScopeNameKind(wid->name))
                 for (auto sf : ast.LookupFunctions(wid->name, wid->ns))
                     if (sf->isthread) wsf = sf;
             if (!wsf) Error(c, "thread_spawn's first argument names a thread_fn");
@@ -525,11 +527,25 @@ inline Val TypeCheck::CheckBuiltin(Call *c, const BuiltinDef &d, vector<Node *> 
         case 'b': v.type = ast.booltype; break;
         case 'e':
             v.type = LoadType(elem);
+            if (IsRefOrSlice(v.type)) {
+                // A reference or slice element leaves as itself: what a
+                // temporary holds is not rooted at the temporary (§9.2), so
+                // it points where the element did and is as writable as its
+                // slot says, as an element read is (ContainerRead).
+                LVal lv;
+                lv.SetProv(rv);
+                lv.type = elem;
+                lv.fromstorage = true;
+                lv.isslot = true;
+                v.SetProv(ContainerRead(lv));
+                c->rettypes.push_back(v.type);
+                break;
+            }
             v.Set(TempRoot(), false);
             if (HoldsPlainRef(v.type)) {
                 // The element leaves as a temporary, holding what it held in
                 // the receiver, as an element read would (ContainerRead).
-                v.contents = Bounds(rv);
+                v.contents = HeldAt(rv);
                 for (auto &a : v.contents.alts) a.slotread = true;
                 v.holderset = true;
                 v.holderfrom = HolderSource(rv);
@@ -920,17 +936,23 @@ inline const string *TypeCheck::EmbedShader(Call *c, vector<Node *> &args) {
 // reference into it stored, which every store the checker has seen is on
 // record for (storeevents). The receiver is named directly, or through a
 // reference variable or parameter, in which case the array behind the
-// reference is what shrinks.
+// reference is what shrinks, or it is a struct's tail field, which shrinks
+// the storage the struct lies in, as a reference to the field would.
 inline void TypeCheck::CheckGrowShrink(Node *at, const char *op, Node *recv, const Val &rv) {
     auto id = Is<Ident>(recv);
     auto vd = id ? id->vdef : nullptr;
     auto at_type = rv.type->kind == TY_REF ? rv.type->ref->sub : rv.type;
-    if (!vd || at_type->kind != TY_ARRAY)
-        Error(at, cat(op, " on a grow-only array names the array's variable, or a "
-                      "reference to it, not an element of another value (§5.1)"));
-    // Through a reference variable or parameter: the array it points at.
-    auto viaref = vd->type && vd->type->kind == TY_REF;
-    auto roots = viaref ? RefRootsOf(vd) : RootsOf(vd);
+    if (at_type->kind != TY_ARRAY)
+        Error(at, cat(op, " on a grow-only array names the array's variable, a reference "
+                      "to it or a struct's field holding it (§5.1)"));
+    Roots roots;
+    if (vd) {
+        // Through a reference variable or parameter: the array it points at.
+        auto viaref = vd->type && vd->type->kind == TY_REF;
+        roots = viaref ? RefRootsOf(vd) : RootsOf(vd);
+    } else {
+        roots = rv.AsRoots();
+    }
     if (roots.Any([&](const RootAlt &a) { return !a.root || IsTemp(a.root); }))
         Error(at, cat(op, " through a reference whose array is not known (§5.1)"));
     ShrinkThrough(at, op, ExprStr(recv), roots, at_type);
@@ -1419,24 +1441,57 @@ inline void TypeCheck::ApplyCalleeStores(FnSpec *spec, vector<Val> &argvals, Nod
         string via;
     };
     vector<SlotStore> slotstores;
+    // A view the storage of callee class cr held, as seen from here: for
+    // each place the argument names exactly, what that place holds -- what
+    // was stored into a local holder (HeldAt), a view the storage of a class
+    // of the caller's holds -- and anywhere else whatever outlives the
+    // storage, as `mapped` gives it.
+    auto mappedheld = [&](VarDef *cr) -> Roots {
+        Roots r, out;
+        classat(cr, r);
+        out.unknown = r.unknown;
+        for (auto &a : r.alts) {
+            Roots one;
+            one.alts.push_back(a);
+            if (a.exact && IsClassRoot(a.root)) {
+                out.Add({ a.root, false, nullptr, a.slotread, true });
+                continue;
+            }
+            out.Add(a.exact ? HeldAt(one) : Bounds(one));
+        }
+        return out;
+    };
+    // The places the stores of one event have gone to so far, to make each
+    // store once (applyevent).
+    struct Made {
+        const StoreEvent *e;
+        VarDef *target;
+        VarDef *root;
+    };
+    vector<Made> made;
     // A slice writes the caller's elements just as an array reference does.
     // Only a read-back from the same container preserves its existing
     // contents provenance (for example a permutation).
-    for (auto &e : rec->classevents) {
-        if (e.src == e.container) continue;
+    auto applyevent = [&](const StoreEvent &e, const Roots &r, bool first) {
         Roots cr;
         auto p = classat(e.container, cr);
-        auto r = mapped(e.root, e.exact);
         auto src = source(e.src);
         auto classread = e.classread && IsClassRoot(src);
+        auto once = [&](VarDef *target, VarDef *root) {
+            for (auto &m : made)
+                if (m.e == &e && m.target == target && m.root == root) return false;
+            made.push_back({ &e, target, root });
+            return true;
+        };
         if (p < 0) {
             // Not the callee's class but a lexical parent's, which a nested
             // function or a function value's body stored into: the storage
             // the parent's callers passed, whose record carries it to them.
             for (auto &a : r.alts)
-                push(e.container, a, e.pointee, src, classread, e.byteview, e.reached, e.bound,
-                     e.slot, e.sliceref);
-            continue;
+                if (once(e.container, a.root))
+                    push(e.container, a, e.pointee, src, classread, e.byteview, e.reached,
+                         e.bound, e.slot, e.sliceref);
+            return;
         }
         // Where the argument's root only bounds the storage, or the store
         // went into storage the class only leads to, the store lands in
@@ -1456,13 +1511,38 @@ inline void TypeCheck::ApplyCalleeStores(FnSpec *spec, vector<Val> &argvals, Nod
                                                 ", whose argument may point into "),
                                   TargetStr(t), ", which ", rname, " does not outlive (§9.2)"));
                 }
-                push(t.root, a, e.pointee, src, classread, e.byteview, e.reached, t.bound,
-                     e.slot, e.sliceref);
+                if (once(t.root, a.root))
+                    push(t.root, a, e.pointee, src, classread, e.byteview, e.reached, t.bound,
+                         e.slot, e.sliceref);
             }
-            if (e.slot)
+            if (e.slot && first)
                 slotstores.push_back({ t.root, t.bound, e,
                                        cat(" through ", spec->sf->name, "'s parameter ", pname,
                                            widen ? ", which may name it" : "") });
+        }
+    };
+    // A store of a view read out of the storage of one of the callee's
+    // classes holds what that storage holds, which the call's other stores
+    // may add to where they land in the same storage: those are applied
+    // until what they store no longer grows.
+    vector<pair<const StoreEvent *, Roots>> held;
+    for (auto &e : rec->classevents) {
+        if (e.src == e.container) continue;
+        Roots unused;
+        if (e.classread && e.src == e.root && !e.exact && classat(e.root, unused) >= 0) {
+            held.push_back({ &e, Roots {} });
+            continue;
+        }
+        applyevent(e, mapped(e.root, e.exact), true);
+    }
+    for (auto again = !held.empty(), first = true; again; first = false) {
+        again = false;
+        for (auto &[e, last] : held) {
+            auto r = mappedheld(e->root);
+            if (!first && r.Same(last)) continue;
+            last = r;
+            again = true;
+            applyevent(*e, r, first);
         }
     }
     // A slice loaded through one slot may be stored into another, and the

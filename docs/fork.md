@@ -1,9 +1,15 @@
 # Integration toolchain
 
 The `lab-toolchain` branch extends upstream revision
-`35368105e3d50341b79a4cb873cc0261e82dfa42`.
+`2ec9b38bde93cda87ee374157b0353722b2d5f8e`.
 It supports external libraries and application input/rendering needed by goose-lab.
 Language ownership, worker isolation and explicit resource cleanup remain unchanged.
+
+Routine goose-lab validation uses this upstream-tracking toolchain. A second
+upstream-only build is reserved for a minimal reproduction of a specific fork
+difference, rather than repeating the same suite on both checkouts. The fork
+changes are module search, C adapter guards, opt-in gfx integration and tooling;
+slice-pool allocation and storage semantics come directly from upstream.
 
 ## Capabilities
 

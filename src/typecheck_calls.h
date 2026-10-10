@@ -46,7 +46,11 @@ inline Val TypeCheck::CheckCall(Call *c, TypeExpr *expected) {
 }
 
 inline Val TypeCheck::CheckNamedCall(Call *c, Ident *id, TypeExpr *expected) {
-    if (LookupVar(id->name, id->ns))
+    // A variable in scope hides the functions of its name (§11.1). A global
+    // one does not: no variable can be called, so the call names the
+    // functions the namespaces declare, which a global variable of the same
+    // name is declared beside.
+    if (auto vd = LookupVar(id->name, id->ns); vd && !vd->isglobal)
         Error(c, cat(id->name, " is a variable, not a function"));
     const FnValBind *fb;
     if (auto t = LookupTypeParam(id->name, fb))
@@ -57,10 +61,8 @@ inline Val TypeCheck::CheckNamedCall(Call *c, Ident *id, TypeExpr *expected) {
         return CheckFunValCall(c, *fb, expected);
     }
     FnSpec *env = nullptr;
-    vector<SFunction *> cands;
-    if (auto nf = LookupLocalFnEnv(id->name, env)) {
-        cands.push_back(nf);
-    } else {
+    auto cands = LookupLocalFns(id->name, env);
+    if (cands.empty()) {
         DefaultScopeName(id->name, c, false);
         cands = ast.LookupFunctions(id->name, id->ns);
     }
@@ -86,31 +88,81 @@ inline Val TypeCheck::CheckNamedCall(Call *c, Ident *id, TypeExpr *expected) {
         for (auto a : args) builtinfallback.erase(a);
         return v;
     }
-    if (!bd) Error(c, cat("unknown function: ", id->name));
+    if (!bd) {
+        if (LookupVar(id->name, id->ns))
+            Error(c, cat(id->name, " is a variable, not a function"));
+        Error(c, cat("unknown function: ", id->name));
+    }
     if (bd->flags & BF_PROPERTY)
         Error(c, cat(id->name, " is a property (use a.", id->name, "), not a call"));
     return CheckBuiltin(c, *bd, c->args, nullptr);
 }
 
-// A nested function visible from the current point, with the lexical
-// environment of the frame that declares it: one declared so far in this
-// frame's scopes, else one the body sees outside them (ForOuterFns).
-inline SFunction *TypeCheck::LookupLocalFnEnv(string_view name, FnSpec *&env) {
+// The nested functions a name reaches from the current point, with the
+// lexical environment of the frame that declares them: those of the name
+// declared so far in the innermost of this frame's scopes that declares one,
+// else those of the innermost scope declaring one that the body sees outside
+// them (ForOuterFns). The functions of one name in one scope are an
+// overload set (§7.5), in declaration order; empty for none. Of several
+// with the same parameter types the one met first wins, as a later local
+// shadows an earlier one: the latest declared so far, and in a body the
+// latest declared at or before it, then the first after it.
+inline vector<SFunction *> TypeCheck::LookupLocalFns(string_view name, FnSpec *&env) {
+    vector<OuterFn> found;
+    auto add = [&](const OuterFn &o) {
+        for (auto &f : found) {
+            if (f.sf->params.size() != o.sf->params.size()) continue;
+            auto same = true;
+            for (size_t i = 0; i < f.sf->params.size() && same; i++) {
+                auto a = f.sf->params[i].type, b = o.sf->params[i].type;
+                same = a && b ? TypeEq(a, b) : !a && !b;
+            }
+            if (same) return;
+        }
+        found.push_back(o);
+    };
     auto top = (int)frames.size() - 1;
+    auto local = false;
     for (auto i = (int)localfns.size() - 1; i >= 0 && localfns[i].first >= frames[top].scopebase;
          i--) {
         if (localfns[i].second->name != name) continue;
         env = frames[top].lexspec;
-        return localfns[i].second;
+        local = true;
+        auto si = localfns[i].first;
+        for (auto j = i; j >= 0 && localfns[j].first >= si; j--)
+            if (localfns[j].first == si && localfns[j].second->name == name)
+                add(OuterFn { localfns[j].second, env, 0, j });
+        break;
     }
-    SFunction *found = nullptr;
-    ForOuterFns(top, [&](SFunction *sf, FnSpec *e) {
-        if (sf->name != name) return false;
-        found = sf;
-        env = e;
-        return true;
-    });
-    return found;
+    if (!local) {
+        auto serial = 0;
+        ForOuterFns(top, [&](const OuterFn &o) {
+            if (o.sf->name != name) return false;
+            if (found.empty()) {
+                serial = o.scopeserial;
+                env = o.env;
+            } else if (o.scopeserial != serial) {
+                return false;
+            }
+            add(o);
+            return false;
+        });
+    }
+    std::sort(found.begin(), found.end(),
+              [](const OuterFn &a, const OuterFn &b) { return a.order < b.order; });
+    vector<SFunction *> fns;
+    for (auto &f : found) fns.push_back(f.sf);
+    return fns;
+}
+
+// The same as one function value: the set's first member, or the whole set
+// where it has several (FnValBind::set), whose storage lasts the check.
+inline FnValBind TypeCheck::LocalFnValue(const vector<SFunction *> &fns, FnSpec *env) {
+    FnValBind fb;
+    fb.named = fns[0];
+    fb.env = env;
+    if (fns.size() > 1) fb.set = &*localfnsets.insert(fns).first;
+    return fb;
 }
 
 inline Val TypeCheck::CheckUfcsCall(Call *c, Dot *d, TypeExpr *expected) {
@@ -157,10 +209,8 @@ inline Val TypeCheck::CheckUfcsCall(Call *c, Dot *d, TypeExpr *expected) {
         Error(c, cat("type parameter ", d->name, " is bound to a function value, which is "
                      "called as ", d->name, "(...), not as a member"));
     FnSpec *env = nullptr;
-    vector<SFunction *> cands;
-    if (auto nf = LookupLocalFnEnv(d->name, env)) {
-        cands.push_back(nf);
-    } else {
+    auto cands = LookupLocalFns(d->name, env);
+    if (cands.empty()) {
         DefaultScopeName(d->name, c, true);
         cands = ast.LookupFunctions(d->name, d->ns);
     }
@@ -328,7 +378,7 @@ inline Val TypeCheck::ResolveCall(Call *c, vector<SFunction *> &cands, FnSpec *e
         JudgeCallCasts(c, cands, env, argnodes, argvals, best, name, nomatch != nullptr);
     if (tied.empty()) {
         // Tag dispatch (§8.2): the match-as-overload-set form.
-        auto v = TryDispatch(c, cands, argnodes, argvals, name);
+        auto v = TryDispatch(c, cands, env, argnodes, argvals, name);
         if (v.type) return v;
         if (nomatch) {   // The caller has a builtin of this name to fall back on.
             *nomatch = true;
@@ -375,6 +425,10 @@ inline Val TypeCheck::ResolveCall(Call *c, vector<SFunction *> &cands, FnSpec *e
             if (i < best.nwritten) CheckArg(argnodes[i], best.paramtypes[i]);
             else InParamDefault(c, best, denv, i,
                                 [&]() { CheckArg(argnodes[i], best.paramtypes[i]); });
+            // A by-value non-fixed-size parameter takes a copy of its
+            // argument (§4.1), a temporary of the statement whatever the
+            // argument names (NoteTemp).
+            if (ClassOf(best.paramtypes[i]) != SC_FIXED) argnodes[i]->nftemp = true;
             // The call's own operands are what later arguments' checks see
             // held (HeldOperands), so a rebound one replaces its original now.
             c->SetArgNode(i, argnodes[i]);
@@ -747,7 +801,7 @@ inline bool TypeCheck::TryMatch(SFunction *sf, Call *c, vector<Val> &argvals, Ma
         ownexclude = &sf->generics;
         auto pt = Subst(sf->params[i].type);
         ownexclude = saveex;
-        auto ct = SubstOwn(pt, mi.bindings);
+        auto ct = DeclType(sf->params[i].type, SubstOwn(pt, mi.bindings));
         if (HasGenerics(ct)) {
             for (auto g : unbound) if (undecided(g)) return false;
             why = cat("cannot infer the type of parameter ", sf->params[i].name,
@@ -785,9 +839,14 @@ inline TypeExpr *TypeCheck::UnifyArg(TypeExpr *pt, Val &av,
 
 inline TypeExpr *TypeCheck::UnifyArgRaw(TypeExpr *pt, Val &av,
                                         vector<pair<string_view, TypeExpr *>> &b, int &tier) {
+    auto written = pt;
     pt = Subst(pt);  // Enclosing functions' generics are already bound.
-    if (av.isnull) {
+    auto own = [&]() {
         auto ct = SubstOwn(pt, b);
+        return ct ? DeclType(written, ct) : ct;
+    };
+    if (av.isnull) {
+        auto ct = own();
         if (!ct || HasGenerics(ct) || !IsOptional(ct)) return nullptr;
         tier = std::max(tier, 2);
         return ct;
@@ -795,7 +854,7 @@ inline TypeExpr *TypeCheck::UnifyArgRaw(TypeExpr *pt, Val &av,
     // A [] takes an array parameter's type, and at a slice parameter is a
     // temporary array of its elements, viewed whole (§4.2).
     if (av.emptyarr) {
-        auto ct = SubstOwn(pt, b);
+        auto ct = own();
         if (!ct || HasGenerics(ct) || (ct->kind != TY_ARRAY && ct->kind != TY_SLICE))
             return nullptr;
         tier = std::max(tier, 2);
@@ -822,7 +881,7 @@ inline TypeExpr *TypeCheck::UnifyArgRaw(TypeExpr *pt, Val &av,
                 BindTypes(pt->sub, at->arr->sub, b);
         }
     }
-    auto ct = SubstOwn(pt, b);
+    auto ct = own();
     if (!ct || HasGenerics(ct)) return nullptr;
     if (TopConstEq(at, ct)) {
         if (hadgen) tier = std::max(tier, 1);
@@ -945,8 +1004,9 @@ inline TypeExpr *TypeCheck::SubstOwn(TypeExpr *pt, vector<pair<string_view, Type
 // Case-function tag dispatch (§8.2): calling an overload set of variant
 // types with the ADT (or a reference to it) dispatches on the tag.
 // Returns a Val with null type when no dispatch position exists.
-inline Val TypeCheck::TryDispatch(Call *c, vector<SFunction *> &cands, vector<Node *> &argnodes,
-                                  vector<Val> &argvals, string_view name) {
+inline Val TypeCheck::TryDispatch(Call *c, vector<SFunction *> &cands, FnSpec *env,
+                                  vector<Node *> &argnodes, vector<Val> &argvals,
+                                  string_view name) {
     auto found = -1;
     vector<MatchInfo> matches;  // Per variant, for the found position.
     TypeExpr *enumtype = nullptr;
@@ -968,6 +1028,7 @@ inline Val TypeCheck::TryDispatch(Call *c, vector<SFunction *> &cands, vector<No
             for (auto sf : cands) {
                 MatchInfo mi;
                 mi.sf = sf;
+                mi.env = env;
                 string why;
                 if (!TryMatch(sf, c, argvals, mi, why, defaults)) continue;
                 if (mi.tier == MatchInfo::INTTOFLOAT) {
@@ -1882,6 +1943,207 @@ inline void TypeCheck::JoinCycle(FnSpec *spec, Node *callnode) {
                       "(§7.8): end its scope before the call"));
         }
     }
+    for (auto i = fi; i <= last; i++) CycleCallTemps(i, callnode);
+    CycleCallResult(spec, callnode);
+}
+
+// The value of n, just checked by the innermost frame (CheckV). One of
+// non-fixed-size class that is no storage -- a call's result, a copy, a
+// str, a literal, a construct's value -- is a temporary of its statement,
+// held on a data stack of the activation until the statement ends (§9.2),
+// which no call into the recursive cycle may be made across (§7.8). A
+// non-fixed-size value the check itself built -- an array or struct
+// literal, or the text print or str renders -- was under construction while
+// its parts were checked, on such a stack, so a call into the cycle among
+// them (the frame counts them, JoinCycle) held that stack across the call.
+// Not so format, whose text goes into the storage it is given.
+inline void TypeCheck::NoteTemp(Node *n, const Val &v, int cyclecalls) {
+    auto nonfixed = v.type && ClassOf(v.type) != SC_FIXED;
+    n->nftemp = nonfixed && !v.lvalue && !v.pointee;
+    auto fi = (int)frames.size() - 1;
+    if (frames[fi].cyclecalls == cyclecalls) return;
+    const char *where = nullptr;
+    if (auto c = Is<Call>(n)) {
+        if (c->builtin == B_PRINT) where = "the arguments of print(...), whose text";
+        else if (c->builtin == B_STR) where = "the arguments of str(...), whose text";
+    } else if (nonfixed && Is<ArrayLit>(n)) {
+        where = "a non-fixed-size array literal, which";
+    } else if (nonfixed && Is<StructLit>(n)) {
+        where = "a non-fixed-size struct literal, which";
+    }
+    if (!where) return;
+    Error(frames[fi].cyclecall,
+          cat(FrameFnName(fi), " calls into its recursive cycle inside ", where, " is under "
+              "construction (§7.8): a value under construction holds a data stack across the "
+              "call; make the call in a statement of its own first, or take an output buffer "
+              "by reference and build into it in place"));
+}
+
+// A non-fixed-size temporary among what n evaluated, where n ran whole
+// before the point asked about: n itself where its value is one (`self`,
+// false for an operand its parent builds in place), else one its operands
+// built. A construct's parts run in scopes of their own, whose temporaries
+// are released as each ends (codegen GenStmt, GenLoopBody), so only its
+// value outlives it, and the head it evaluated before them: an if's
+// condition and a match's scrutinee. So does the right operand of && and ||.
+inline Node *TypeCheck::FindTemp(Node *n, bool self) {
+    if (!n) return nullptr;
+    if (self && n->nftemp) return n;
+    if (auto ie = Is<IfExpr>(n)) return FindTemp(ie->cond);
+    if (auto m = Is<MatchExpr>(n)) return FindTemp(m->scrutinee);
+    if (Is<Block>(n) || Is<EarlyBlock>(n) || Is<LoopExpr>(n) || Is<While>(n) ||
+        Is<ForLoop>(n) || Is<FunVal>(n) || Is<InlineBlock>(n))
+        return nullptr;
+    if (auto b = Is<Binary>(n); b && (b->op == T_ANDAND || b->op == T_OROR))
+        return FindTemp(b->left);
+    Node *found = nullptr;
+    n->Children([&](Node *ch) { if (!found) found = FindTemp(ch); });
+    return found;
+}
+
+// Frame fi's call into the cycle (JoinCycle) is made at some point of its
+// statement. What ran before that point and is still live: the earlier
+// operands of every node on the path from the statement to the call, and
+// the head of a construct the path enters a branch or body of -- an if's
+// condition, a match's scrutinee, a while's condition, a for's sequence --
+// which codegen evaluates in the scope around the construct. A non-fixed-
+// size temporary among them lives to the end of the statement (§9.2), on a
+// data stack of the calling activation, so the call would take a stack per
+// activation for it (§7.8). An operand its parent builds in place -- a
+// returned value, a local's initializer, an assigned value, a pushed or
+// appended element -- is no temporary itself, though what it evaluated may
+// be.
+inline void TypeCheck::CycleCallTemps(int fi, Node *callnode) {
+    auto &path = StateOf(fi).nodepath;
+    for (size_t k = 0; k < path.size(); k++) {
+        auto &e = path[k];
+        if (e.frame != fi) continue;
+        auto n = e.node;
+        auto inplace = [&](int at) {
+            if (Is<Return>(n) || Is<VarDecl>(n)) return true;
+            if (auto a = Is<Assign>(n)) return at == 1 && a->op == T_ASSIGN;
+            auto c = Is<Call>(n);
+            return c && (c->builtin == B_PUSH || c->builtin == B_APPEND) && at == 1;
+        };
+        Node *t = nullptr;
+        auto i = 0;
+        auto direct = false;
+        ForOperands(n, [&](Node *ch, HoldKind) {
+            auto at = i++;
+            if (t || at >= e.pos) return;
+            t = FindTemp(ch, !inplace(at));
+            direct = t == ch && n == callnode;
+        });
+        if (!t && k + 1 < path.size()) {
+            auto next = path[k + 1].node;
+            if (auto ie = Is<IfExpr>(n)) {
+                if (next != ie->cond) t = FindTemp(ie->cond);
+            } else if (auto m = Is<MatchExpr>(n)) {
+                if (next != m->scrutinee) t = FindTemp(m->scrutinee);
+            } else if (auto w = Is<While>(n)) {
+                if (next != w->cond) t = FindTemp(w->cond);
+            } else if (auto fl = Is<ForLoop>(n)) {
+                auto r = Is<RangeExpr>(fl->iter);
+                if (next != fl->iter && !(r && (next == r->lo || next == r->hi)))
+                    t = FindTemp(fl->iter);
+            }
+        }
+        if (!t) continue;
+        if (direct)
+            Error(frames[fi].cyclecall,
+                  cat(FrameFnName(fi), " calls into its recursive cycle with the non-fixed-size "
+                      "temporary ", ExprStr(t), " as an argument (§7.8): pass it in from outside "
+                      "the cycle"));
+        Error(frames[fi].cyclecall,
+              cat(FrameFnName(fi), " calls into its recursive cycle while the non-fixed-size "
+                  "temporary ", ExprStr(t), " (evaluated at ", Where(t->line), ") is live "
+                  "(§7.8): a temporary lives to the end of its statement, so build it in a "
+                  "statement before the call, or pass it in from outside the cycle"));
+    }
+}
+
+// The result of each frame's call into the cycle (JoinCycle), where it is
+// of non-fixed-size class: it is built where the call's destination is,
+// which is a temporary of the statement -- a data stack taken before the
+// call and held across it (§7.8) -- unless the destination is the caller's,
+// where the call is the whole value of a return of the same result types
+// (forwarded, codegen GenNormalReturn), reached through the constructs
+// whose value it is (a block's tail, a branch, a break's value); resizable
+// storage the value is pushed or appended into, built in place at its top
+// (which §1.3(4) then rejects where the callee grows that storage, as every
+// function of a cycle appending into it does); or a local being
+// initialized, which CheckCycleInit reports. An assignment's value is one
+// whose callee may use the target, rejected by §4.4 before this. A frame's
+// call is the innermost call on its path, whose callee's body the next
+// frame checks.
+inline void TypeCheck::CycleCallResult(FnSpec *spec, Node *callnode) {
+    auto last = (int)frames.size() - 1;
+    auto fi = FrameOfSpec(CycleHead(spec));
+    if (fi < 0) fi = 0;
+    for (auto i = fi; i <= last; i++) {
+        if (!frames[i].spec || !frames[i].sf || frames[i].isfunval) continue;
+        auto callee = i == last ? spec : frames[i + 1].spec;
+        if (i < last && (!callee || !frames[i + 1].sf || frames[i + 1].isfunval)) continue;
+        auto nonfixed = false;
+        for (auto rt : callee->rets) nonfixed |= ClassOf(rt) != SC_FIXED;
+        if (!nonfixed) continue;
+        auto &path = StateOf(i).nodepath;
+        auto k = (int)path.size() - 1;
+        while (k >= 0 && (path[k].frame != i || !Is<Call>(path[k].node))) k--;
+        if (k < 0 || (i == last && path[k].node != callnode)) continue;
+        auto call = path[k].node;
+        auto returned = [&](FnSpec *target, size_t at, size_t count) {
+            if (!target || !target->retsknown) return false;
+            if (count == 1 && callee->rets.size() > 1) {
+                // A single call forwarding every result (§7.1).
+                if (target->rets.size() != callee->rets.size()) return false;
+                for (size_t r = 0; r < callee->rets.size(); r++)
+                    if (!TypeEq(callee->rets[r], target->rets[r])) return false;
+                return true;
+            }
+            return callee->rets.size() == 1 && at < target->rets.size() &&
+                   TypeEq(callee->rets[0], target->rets[at]);
+        };
+        auto ok = false, exiting = false;
+        for (k--; k >= 0; k--) {
+            auto parent = path[k].node, child = path[k + 1].node;
+            // A break's value lands where the loop or block it exits
+            // delivers its own; nothing between them consumes it.
+            if (exiting) {
+                if (Is<LoopExpr>(parent) || Is<EarlyBlock>(parent)) exiting = false;
+                else if (Is<While>(parent) || Is<ForLoop>(parent)) break;
+                continue;
+            }
+            if (Is<Break>(parent)) { exiting = true; continue; }
+            if (auto b = Is<Block>(parent)) { if (b->tail == child) continue; break; }
+            if (auto ie = Is<IfExpr>(parent)) { if (child != ie->cond) continue; break; }
+            if (auto m = Is<MatchExpr>(parent)) { if (child != m->scrutinee) continue; break; }
+            if (Is<EarlyBlock>(parent) || Is<LoopExpr>(parent)) continue;
+            if (auto r = Is<Return>(parent)) {
+                size_t at = 0;
+                while (at < r->vals.size() && r->vals[at] != child) at++;
+                ok = returned(r->targetspec, at, r->vals.size());
+            } else if (auto c = Is<Call>(parent)) {
+                ok = (c->builtin == B_PUSH || c->builtin == B_APPEND) &&
+                     OperandIndex(c, child) == 1;
+            } else if (Is<VarDecl>(parent)) {
+                ok = true;
+            }
+            break;
+        }
+        // Off the top of the path through constructs whose value the call's
+        // is: the body's tail, which is returned (CheckSpecBodyOnce), else a
+        // statement whose value is dropped.
+        auto body = frames[i].spec->body;
+        if (k < 0 && !exiting && body && path[0].node == body->tail)
+            ok = returned(frames[i].spec, 0, 1);
+        if (ok) continue;
+        Error(call, cat(FrameFnName(i), " calls into its recursive cycle through ",
+                        callee->sf->name, ", whose non-fixed-size result would land in a "
+                        "temporary here, holding a data stack across the call (§7.8): return "
+                        "it as the whole result, or take an output buffer by reference and "
+                        "build into it in place"));
+    }
 }
 
 // A cycle's back edges take the roots of its functions' results before their
@@ -1949,7 +2211,10 @@ inline void TypeCheck::ValidateThreadArgs(FnSpec *spec, vector<Val> &argvals, No
         if (it == threadedclasses.end() || it->second.broken) continue;
         if (argvals[i].None()) continue;   // Nowhere yet: the next round knows.
         auto ar = argvals[i].Root();
-        if (!argvals[i].Exact() || UltimateRoot(pr) != UltimateRoot(ar) || !ThreadedChain(ar)) {
+        // A class read through a threaded one takes what is read through it
+        // or rooted at it.
+        auto rooted = argvals[i].Exact() || (it->second.bounded && argvals[i].alts.size() == 1);
+        if (!rooted || UltimateRoot(pr) != UltimateRoot(ar) || !ThreadedChain(ar)) {
             Unthread(pr, cat(spec->inprogress ? "the recursive call at " : "the call at ",
                              Where(callnode->line), " passes ", spec->params[i]->name,
                              " rooted differently from ",
@@ -1967,13 +2232,14 @@ inline void TypeCheck::ValidateThreadArgs(FnSpec *spec, vector<Val> &argvals, No
 
 // Whether what is rooted at r is the same storage in every activation, as
 // far as the parameter classes it was passed through tell: a pool class's
-// always is, and any other class's while it is threaded. A class is known
-// by the root it was created from: a variable whose declaration is being
-// checked has no type yet either.
+// always is, and any other class's while it is threaded, unless it was
+// read through one (ThreadedClass::bounded). A class is known by the root it
+// was created from: a variable whose declaration is being checked has no
+// type yet either.
 inline bool TypeCheck::ThreadedChain(VarDef *r) {
     if (!r || !r->classfrom || r->poolclass) return true;
     auto it = threadedclasses.find(r);
-    return it != threadedclasses.end() && !it->second.broken;
+    return it != threadedclasses.end() && !it->second.broken && !it->second.bounded;
 }
 
 // A class its creating call rooted exactly (CheckSpecBody): threaded until a
@@ -1990,6 +2256,7 @@ inline void TypeCheck::NoteThreadedClass(VarDef *cls) {
     }
     auto &tc = threadedclasses[cls];
     if (!parent) return;
+    tc.bounded = parent->bounded;
     if (parent->broken) {
         tc.broken = true;
         tc.why = parent->why;
@@ -2420,6 +2687,7 @@ inline void TypeCheck::CheckSpecBodyOnce(FnSpec *spec, vector<Val> *argvals, Lin
     // and the call site replays this body's shrinks and growths against
     // the caller's statement and constructions from the summary.
     BodyScope bodyscope(*this);
+    frames[fi].bodyidx = (int)outerbodies.size();
     auto savereach = reachable;
     DestScope ds(*this, Dest {});
     // Whatever the call's result is for -- the slot it lands in, the return
@@ -2589,9 +2857,39 @@ inline void TypeCheck::CheckSpecBodyOnce(FnSpec *spec, vector<Val> *argvals, Lin
         h->ref.byteview = va.byteview;
         h->ref.freshview = va.byteview;
     }
-    for (size_t k = 1; !spec->rounds && k < classroots.size(); k++)
-        if (classroots[k] && exactrefs[k] && !classroots[k]->poolclass)
+    // A class whose arguments were each read through one parameter class,
+    // a pool class or one threaded exactly, points into the storage that
+    // class leads to, outside the cycle, as long as it stays so (§7.8).
+    auto readthrough = [&](size_t k) {
+        if (!argvals) return false;
+        auto any = false;
+        for (size_t i = 0; i < sf->params.size() && i < argvals->size(); i++) {
+            if (i < spec->views.size() && spec->views[i].cls == (int)k) return false;
+            if (spec->roots[i].cls != (int)k) continue;
+            if (!IsRefOrSlice(spec->argtypes[i])) return false;
+            auto &av = (*argvals)[i];
+            if (av.alts.size() != 1 || av.alts[0].exact) return false;
+            auto r = av.alts[0].root;
+            if (!r || !r->classfrom) return false;
+            if (!r->poolclass) {
+                auto it = threadedclasses.find(r);
+                if (it == threadedclasses.end() || it->second.broken || it->second.bounded)
+                    return false;
+            }
+            any = true;
+        }
+        return any;
+    };
+    for (size_t k = 1; !spec->rounds && k < classroots.size(); k++) {
+        if (!classroots[k] || classroots[k]->poolclass) continue;
+        if (exactrefs[k]) {
             NoteThreadedClass(classroots[k]);
+        } else if (readthrough(k)) {
+            NoteThreadedClass(classroots[k]);
+            if (auto it = threadedclasses.find(classroots[k]); it != threadedclasses.end())
+                it->second.bounded = true;
+        }
+    }
     if (sf->has_rets && !spec->retsknown) {
         for (auto rt : sf->rets) {
             auto ct = Subst(rt);
@@ -2634,6 +2932,7 @@ inline void TypeCheck::CheckSpecBodyOnce(FnSpec *spec, vector<Val> *argvals, Lin
             Val tv;
             {
                 FlagScope ret(inreturn, true);
+                RetValScope rv(*this, spec->body->tail);
                 tv = spec->retsknown ? CheckValue(spec->body->tail, expected)
                                      : CheckInferredResult(spec->body->tail, spec);
             }
@@ -2659,6 +2958,8 @@ inline void TypeCheck::CheckSpecBodyOnce(FnSpec *spec, vector<Val> *argvals, Lin
         if (!spec->retsknown) spec->retsknown = true;  // No returns at all: void.
     }
     if (!spec->retsknown) spec->retsknown = true;
+    NamedResultCopyWarning(spec);
+    CheckNamedResultUses(spec);
     PopScope();
     frames.pop_back();
     for (auto [v, n] : outernarrowed) v->narrowed = n;
@@ -2679,6 +2980,21 @@ inline void TypeCheck::CheckSpecBodyOnce(FnSpec *spec, vector<Val> *argvals, Lin
     spec->inprogress = false;
     spec->record.eventend = storeevents.size();
     spec->rounds++;
+}
+
+// A local a function returns is built at the result's destination, so that
+// returning it costs nothing (§7.3), unless another return stands in the way
+// (NamedResultOf): then it is built on a stack of its own and copied, which
+// may be a large copy nothing in the source shows.
+inline void TypeCheck::NamedResultCopyWarning(FnSpec *spec) {
+    for (size_t j = 0; j < spec->rets.size(); j++) {
+        if (ClassOf(spec->rets[j]) == SC_FIXED) continue;
+        NamedResultStop ns;
+        if (goose::NamedResultOf(spec->body, spec->sf, spec->rets.size(), j, &ns) || !ns.at)
+            continue;
+        Warn(ns.at, cat("`", ns.local->name, "` is copied on return rather than built where the ",
+                        "result goes: ", ns.why, " (§7.3)"));
+    }
 }
 
 // Shared by `return` statements and body tails: agree the values with
@@ -2899,9 +3215,8 @@ inline void TypeCheck::CheckReturn(Return *r) {
         // enclosing call of any of those declarations, so an unrelated
         // function sharing the leaf name cannot catch the return.
         FnSpec *env = nullptr;
-        vector<SFunction *> targets;
-        if (auto nf = LookupLocalFnEnv(r->from, env)) targets.push_back(nf);
-        else targets = ast.LookupFunctions(r->from, r->ns);
+        auto targets = LookupLocalFns(r->from, env);
+        if (targets.empty()) targets = ast.LookupFunctions(r->from, r->ns);
         if (targets.empty()) Error(r, cat("return from ", r->from, ": unknown function"));
         for (auto i = (int)frames.size() - 1; i >= 1 && tf < 0; i--) {
             if (frames[i].isfunval || !frames[i].sf) continue;
@@ -2934,8 +3249,12 @@ inline void TypeCheck::CheckReturn(Return *r) {
         FlagScope rs(inreturn, true);
         if (r->vals.size() == 1) {
             auto one = tspec->retsknown && tspec->rets.size() == 1 ? tspec->rets[0] : nullptr;
-            auto v = tspec->retsknown ? CheckValue(r->vals[0], one)
-                                      : CheckInferredResult(r->vals[0], tspec);
+            Val v;
+            {
+                RetValScope rv(*this, tf == (int)frames.size() - 1 ? r->vals[0] : nullptr);
+                v = tspec->retsknown ? CheckValue(r->vals[0], one)
+                                     : CheckInferredResult(r->vals[0], tspec);
+            }
             if (auto call = Is<Call>(r->vals[0]); call && call->rettypes.size() > 1) {
                 vals = lastcallrets;  // Forward a multi-value call.
                 // Each value meets its return type as a value of its own
@@ -3020,7 +3339,7 @@ inline Val TypeCheck::CheckFunValCall(Call *c, const FnValBind &fb, TypeExpr *ex
     if (c->trailing)
         Error(c, "a function value call cannot itself take a trailing block");
     if (fb.named) {
-        vector<SFunction *> cands = { fb.named };
+        vector<SFunction *> cands = fb.set ? *fb.set : vector<SFunction *> { fb.named };
         Node *nopre = nullptr;
         return ResolveCall(c, cands, fb.env, fb.named->name, nullptr, nopre, nullptr, expected);
     }
@@ -3091,6 +3410,7 @@ inline Val TypeCheck::CheckFunValCall(Call *c, const FnValBind &fb, TypeExpr *ex
     f.varbase = (int)vars.size();
     f.callline = c->line;
     f.isfunval = true;
+    f.bodyidx = (int)outerbodies.size();
     frames.push_back(f);
     PushScope(SK_FN);
     c->fvparams.clear();
