@@ -11,6 +11,13 @@ difference, rather than repeating the same suite on both checkouts. The fork
 changes are module search, C adapter guards, opt-in gfx integration and tooling;
 slice-pool allocation and storage semantics come directly from upstream.
 
+The compiler also carries the focused fix `b08994e`: an inlined body's implicit
+return now uses the same destination landing as an explicit return. Without it,
+an early named variable-size result can remain where the caller reads a later
+successful result. `test/codegen/inlined_named_result_tail.goose` covers packed
+structs, resizable arrays, both branches and an append destination. The fix is
+independent of the integration extensions and can be proposed upstream on its own.
+
 ## Capabilities
 
 | Area | Extension | Boundary |
