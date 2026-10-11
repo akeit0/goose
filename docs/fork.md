@@ -1,7 +1,7 @@
 # Integration toolchain
 
 The `lab-toolchain` branch extends upstream revision
-`2ec9b38bde93cda87ee374157b0353722b2d5f8e`.
+`ac77e1616542da1dcb3ebf54b1f43d9b32b6369c`.
 It supports external libraries and application input/rendering needed by goose-lab.
 Language ownership, worker isolation and explicit resource cleanup remain unchanged.
 
@@ -11,12 +11,11 @@ difference, rather than repeating the same suite on both checkouts. The fork
 changes are module search, C adapter guards, opt-in gfx integration and tooling;
 slice-pool allocation and storage semantics come directly from upstream.
 
-The compiler also carries the focused fix `b08994e`: an inlined body's implicit
-return now uses the same destination landing as an explicit return. Without it,
-an early named variable-size result can remain where the caller reads a later
-successful result. `test/codegen/inlined_named_result_tail.goose` covers packed
-structs, resizable arrays, both branches and an append destination. The fix is
-independent of the integration extensions and can be proposed upstream on its own.
+The implicit inline-return correction originally carried as `b08994e` is now
+upstream in [PR #11](https://github.com/aardappel/goose/pull/11), commit `e7792d7`.
+Its regression, `test/codegen/inlined_named_result_tail.goose`, remains part of
+upstream's tests. There is no remaining fork difference in that correction or
+the typechecking, optimizer and slice-pool runtime used by the lab experiments.
 
 ## Capabilities
 
