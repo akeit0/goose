@@ -20,8 +20,8 @@ The implicit inline-return correction is upstream in PR #11 (`e7792d7`).
   environment initialization in the Python test tooling.
 
 Graphics, audio, UI and physics are external upstream packages. The compiler's
-normal build has no SDL dependency and no builtin native packages. Goose-lab pins
-`aardappel/goose_gfx` and owns its input/presentation extensions and regressions;
+normal build has no SDL dependency and no builtin native packages. Goose-lab directly maintains graphics package source derived from
+`aardappel/goose_gfx`, including its input/presentation extensions and regressions;
 no native graphics source or lab graphics fixture remains in this compiler fork.
 TinyCC is vendored by upstream and always built for JIT support.
 
